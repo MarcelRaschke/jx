@@ -1,6 +1,7 @@
 package upgrade
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -20,7 +21,6 @@ import (
 	"github.com/jenkins-x/jx/pkg/cmd/version"
 
 	jxcore "github.com/jenkins-x/jx-api/v4/pkg/apis/core/v4beta1"
-	"github.com/jenkins-x/jx-api/v4/pkg/client/clientset/versioned"
 	"github.com/jenkins-x/jx-helpers/v3/pkg/termcolor"
 	"github.com/rhysd/go-github-selfupdate/selfupdate"
 
@@ -33,7 +33,7 @@ import (
 	"github.com/jenkins-x/jx-helpers/v3/pkg/gitclient"
 	"github.com/jenkins-x/jx-helpers/v3/pkg/gitclient/cli"
 	"github.com/jenkins-x/jx-logging/v3/pkg/log"
-	"github.com/pkg/errors"
+
 	"github.com/spf13/cobra"
 )
 
@@ -58,7 +58,6 @@ const (
 type CLIOptions struct {
 	CommandRunner       cmdrunner.CommandRunner
 	GitClient           gitclient.Interface
-	JXClient            versioned.Interface
 	Version             string
 	VersionStreamGitURL string
 	FromEnvironment     bool
@@ -73,7 +72,7 @@ func NewCmdUpgradeCLI() (*cobra.Command, *CLIOptions) {
 		Short:   "Upgrades your local Jenkins X CLI",
 		Long:    cmdCLILong,
 		Example: cmdCLIExample,
-		Run: func(cmd *cobra.Command, args []string) {
+		Run: func(_ *cobra.Command, _ []string) {
 			err := o.Run()
 			helper.CheckErr(err)
 		},
@@ -87,20 +86,15 @@ func NewCmdUpgradeCLI() (*cobra.Command, *CLIOptions) {
 // Run implements the command
 func (o *CLIOptions) Run() error {
 	var err error
-	o.JXClient, err = jxclient.LazyCreateJXClient(o.JXClient)
-	if err != nil {
-		return errors.Wrapf(err, "failed to create jx client")
-	}
 
-	// upgrading to a specific version is not yet supported in brew so lets disable it for upgrades
 	candidateInstallVersion, err := o.candidateInstallVersion()
 	if err != nil {
-		return errors.Wrapf(err, "failed to find jx cli version")
+		return fmt.Errorf("failed to find jx cli version: %w", err)
 	}
 
 	currentVersion, err := version.GetSemverVersion()
 	if err != nil {
-		return errors.Wrap(err, "failed to determine version of currently install jx release")
+		return fmt.Errorf("failed to determine version of currently install jx release: %w", err)
 	}
 
 	log.Logger().Debugf("Current version of jx: %s", termcolor.ColorInfo(currentVersion))
@@ -108,7 +102,7 @@ func (o *CLIOptions) Run() error {
 	if o.NeedsUpgrade(currentVersion, candidateInstallVersion) {
 		shouldUpgrade, err := o.ShouldUpdate(candidateInstallVersion)
 		if err != nil {
-			return errors.Wrap(err, "failed to determine if we should upgrade")
+			return fmt.Errorf("failed to determine if we should upgrade: %w", err)
 		}
 		if shouldUpgrade {
 			return o.InstallJx(true, candidateInstallVersion.String())
@@ -127,7 +121,7 @@ func (o *CLIOptions) candidateInstallVersion() (semver.Version, error) {
 			// get the versionstream URL used to find what jx version to upgrade to
 			gitURL, err = o.getVersionStreamURL(gitURL)
 			if err != nil {
-				return semver.Version{}, errors.Wrapf(err, "failed to get version stream ")
+				return semver.Version{}, fmt.Errorf("failed to get version stream : %w", err)
 			}
 		}
 
@@ -137,13 +131,13 @@ func (o *CLIOptions) candidateInstallVersion() (semver.Version, error) {
 
 		o.Version, err = o.getJXVersion(gitURL)
 		if err != nil {
-			return semver.Version{}, errors.Wrapf(err, "failed to get jx cli version from %s", gitURL)
+			return semver.Version{}, fmt.Errorf("failed to get jx cli version from %s: %w", gitURL, err)
 		}
 	}
 
 	requestedVersion, err := semver.New(o.Version)
 	if err != nil {
-		return semver.Version{}, errors.Wrapf(err, "invalid version requested: %s", o.Version)
+		return semver.Version{}, fmt.Errorf("invalid version requested: %s: %w", o.Version, err)
 	}
 	return *requestedVersion, nil
 }
@@ -168,7 +162,7 @@ func (o *CLIOptions) getVersionStreamURL(gitURL string) (string, error) {
 			if err == nil {
 				gitURL, err = refNode.String()
 				if err != nil {
-					return "", errors.Wrapf(err, "failed to get a string value of the Kptfile git repo")
+					return "", fmt.Errorf("failed to get a string value of the Kptfile git repo: %w", err)
 				}
 				gitURL = strings.TrimSpace(gitURL)
 
@@ -178,7 +172,12 @@ func (o *CLIOptions) getVersionStreamURL(gitURL string) (string, error) {
 	}
 	if o.FromEnvironment {
 		// lookup the cluster git repo from the dev environment and use that as the versionstream
-		env, err := jxenv.GetDevEnvironment(o.JXClient, jxcore.DefaultNamespace)
+		jXClient, err := jxclient.LazyCreateJXClient(nil)
+		if err != nil {
+			return "", fmt.Errorf("failed to create jx client: %w", err)
+		}
+
+		env, err := jxenv.GetDevEnvironment(jXClient, jxcore.DefaultNamespace)
 		if err == nil {
 			if env.Spec.Source.URL != "" {
 				gitURL = env.Spec.Source.URL
@@ -194,7 +193,7 @@ func (o *CLIOptions) getVersionStreamURL(gitURL string) (string, error) {
 	return gitURL, nil
 }
 
-func (o *CLIOptions) NeedsUpgrade(currentVersion, latestVersion semver.Version) bool {
+func (*CLIOptions) NeedsUpgrade(currentVersion, latestVersion semver.Version) bool {
 	if latestVersion.EQ(currentVersion) {
 		log.Logger().Infof("You are already on the latest version of jx %s", termcolor.ColorInfo(currentVersion.String()))
 		return false
@@ -203,7 +202,7 @@ func (o *CLIOptions) NeedsUpgrade(currentVersion, latestVersion semver.Version) 
 }
 
 // ShouldUpdate checks if CLI version should be updated
-func (o *CLIOptions) ShouldUpdate(newVersion semver.Version) (bool, error) {
+func (*CLIOptions) ShouldUpdate(newVersion semver.Version) (bool, error) {
 	log.Logger().Debugf("Checking if should upgrade %s", newVersion)
 	currentVersion, err := version.GetSemverVersion()
 	if err != nil {
@@ -224,7 +223,7 @@ func (o *CLIOptions) ShouldUpdate(newVersion semver.Version) (bool, error) {
 }
 
 // InstallJx installs jx cli
-func (o *CLIOptions) InstallJx(upgrade bool, version string) error {
+func (*CLIOptions) InstallJx(upgrade bool, version string) error {
 	log.Logger().Debugf("installing jx %s", version)
 	binary := "jx"
 	if !upgrade {
@@ -242,12 +241,12 @@ func (o *CLIOptions) InstallJx(upgrade bool, version string) error {
 	clientURL := fmt.Sprintf("%s%s/"+binary+"-%s-%s.%s", BinaryDownloadBaseURL, version, runtime.GOOS, runtime.GOARCH, extension)
 	exe, err := os.Executable()
 	if err != nil {
-		return errors.Wrapf(err, "failed to get the jx executable which is running this command")
+		return fmt.Errorf("failed to get the jx executable which is running this command: %w", err)
 	}
 
 	err = selfupdate.UpdateTo(clientURL, exe)
 	if err != nil {
-		return errors.Wrapf(err, "failed to upgrade jx cli to version %s", version)
+		return fmt.Errorf("failed to upgrade jx cli to version %s: %w", version, err)
 	}
 	log.Logger().Infof("Jenkins X client has been upgraded to version %s", version)
 	return nil
@@ -260,7 +259,7 @@ func (o *CLIOptions) getJXVersion(gitURL string) (string, error) {
 
 	versionStreamDir, err := gitclient.CloneToDir(o.GitClient, gitURL, "")
 	if err != nil {
-		return "", errors.Wrapf(err, "failed to clone git repo %s", gitURL)
+		return "", fmt.Errorf("failed to clone git repo %s: %w", gitURL, err)
 	}
 
 	exists, _ := files.DirExists(filepath.Join(versionStreamDir, "versionStream"))
@@ -274,7 +273,7 @@ func (o *CLIOptions) getJXVersion(gitURL string) (string, error) {
 
 	data, err := resolver.StableVersion(versionstream.KindPackage, "jx")
 	if err != nil {
-		return "", errors.Wrapf(err, "failed to get stable version for %s from versionstream %s", "jx", gitURL)
+		return "", fmt.Errorf("failed to get stable version for %s from versionstream %s: %w", "jx", gitURL, err)
 	}
 	return data.Version, nil
 }
@@ -286,7 +285,7 @@ func shouldInstallBinary(name string) (bool, error) {
 
 	binDir, err := util.JXBinLocation()
 	if err != nil {
-		return download, errors.Wrapf(err, "unable to find JXBinLocation at %s", binDir)
+		return download, fmt.Errorf("unable to find JXBinLocation at %s: %w", binDir, err)
 	}
 
 	if contains(GlobalBinaryPathAllowlist, name) {
@@ -304,7 +303,7 @@ func shouldInstallBinary(name string) (bool, error) {
 		return download, nil
 	}
 	if err != nil {
-		return download, errors.Wrapf(err, "unable to check files on %s", binDir)
+		return download, fmt.Errorf("unable to check files on %s: %w", binDir, err)
 	}
 
 	download = true

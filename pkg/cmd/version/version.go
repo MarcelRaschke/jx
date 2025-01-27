@@ -6,7 +6,7 @@ import (
 	"os"
 
 	"github.com/blang/semver"
-	"github.com/pkg/errors"
+
 	"github.com/spf13/cobra"
 )
 
@@ -68,7 +68,7 @@ func NewCmdVersion() (*cobra.Command, *Options) {
 	cmd := &cobra.Command{
 		Use:   "version",
 		Short: "Displays the version of this command",
-		Run: func(cmd *cobra.Command, args []string) {
+		Run: func(_ *cobra.Command, _ []string) {
 			o.run()
 		},
 	}
@@ -157,7 +157,7 @@ func GetSemverVersion() (semver.Version, error) {
 	text := getVersion()
 	v, err := semver.Make(text)
 	if err != nil {
-		return v, errors.Wrapf(err, "failed to parse version %s", text)
+		return v, fmt.Errorf("failed to parse version %s: %w", text, err)
 	}
 	return v, nil
 }
